@@ -1,88 +1,9 @@
-#define _GNU_SOURCE
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
-#include <limits.h>
 #include <dirent.h>
-#include <sys/syscall.h>
 
-// Linux kernel dirent format
-struct linux_dirent64 {
-	ino64_t d_ino;
-	off64_t d_off;
-	unsigned short d_reclen;
-	unsigned char d_type;
-	char d_name[];
-};
-
-static int calculate_size;
-static long long file_count = 1;
-static long long size;
-
-void traverse(int dirfd)
-{
-	char buf[64 * 1024];
-
-	for (;;) {
-		int nread = syscall(SYS_getdents64, dirfd, buf, sizeof(buf));
-		if (nread == -1) {
-			perror("getdents64");
-			return;
-		}
-		if (nread == 0)
-			break;
-
-		for (int bpos = 0; bpos < nread;) {
-			struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + bpos);
-			char *name = d->d_name;
-			int stated = 0;
-
-			bpos += d->d_reclen;
-			if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
-				continue;
-
-			file_count++;
-
-			struct stat st;
-			if (d->d_type == DT_UNKNOWN) {
-				int r = fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW);
-				if (r != -1) {
-					stated = 1;
-					if (S_ISREG(st.st_mode))
-						d->d_type = DT_REG;
-					else if (S_ISDIR(st.st_mode))
-						d->d_type = DT_DIR;
-				}
-			}
-			if (calculate_size && d->d_type == DT_REG) {
-				if (!stated) {
-					int r = fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW);
-					if (r == -1) {
-						perror("fstatat");
-						continue;
-					}
-				}
-				size += st.st_size;
-			}
-
-			if (d->d_type == DT_DIR) {
-				int childfd = openat(dirfd, name, O_RDONLY | O_DIRECTORY);
-				if (childfd == -1) {
-					perror("openat");
-				} else {
-					traverse(childfd);
-					close(childfd);
-				}
-			}
-		}
-	}
-}
+#include "traverse.h"
 
 int main(int argc, char *argv[])
 {
@@ -91,23 +12,30 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	int flags = TRV_NONE;
+	long count = 1;
+	long long size = 0;
+
 	if (strcmp(argv[1], "-s") == 0) {
-		calculate_size = 1;
+		flags |= TRV_STAT;
 		argv++;
 		argc--;
 	}
 
-	int fd = open(argv[1], O_RDONLY | O_DIRECTORY);
-	if (fd == -1) {
-		perror("open");
-		return 1;
+	struct traverse_ctx *ctx = traverse_init(argv[1], flags);
+
+	struct traverse_ctx_entry *e;
+	while ((e = traverse_next(ctx))) {
+		count++;
+		if (flags & TRV_STAT && e->dtype == DT_REG)
+			size += e->st.st_size;
 	}
 
-	traverse(fd);
-	close(fd);
+	traverse_close(ctx);
 
-	printf("Total files: %lld\n", file_count);
-	if (calculate_size)
+	printf("Number of files: %ld\n", count);
+	if (flags & TRV_STAT)
 		printf("Total size: %lld bytes\n", size);
+
 	return 0;
 }

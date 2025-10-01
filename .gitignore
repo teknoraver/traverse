@@ -1,4 +1,8 @@
 /fts
 /nftw
 /traverse
+/traverse_test
+/test
 *~
+.*.swp
+*.o
