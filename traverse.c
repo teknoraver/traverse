@@ -21,11 +21,13 @@ struct linux_dirent64 {
 	char d_name[];
 };
 
+static int calculate_size;
 static long long file_count = 1;
+static long long size;
 
 void traverse(int dirfd)
 {
-	char buf[4096];
+	char buf[64 * 1024];
 
 	for (;;) {
 		int nread = syscall(SYS_getdents64, dirfd, buf, sizeof(buf));
@@ -39,21 +41,45 @@ void traverse(int dirfd)
 		for (int bpos = 0; bpos < nread;) {
 			struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + bpos);
 			char *name = d->d_name;
+			int stated = 0;
 
-			if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
-				file_count++;
+			bpos += d->d_reclen;
+			if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+				continue;
 
-				if (d->d_type == DT_DIR) {
-					int childfd = openat(dirfd, name, O_RDONLY | O_DIRECTORY);
-					if (childfd == -1) {
-						perror("openat");
-					} else {
-						traverse(childfd);
-						close(childfd);
-					}
+			file_count++;
+
+			struct stat st;
+			if (d->d_type == DT_UNKNOWN) {
+				int r = fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW);
+				if (r != -1) {
+					stated = 1;
+					if (S_ISREG(st.st_mode))
+						d->d_type = DT_REG;
+					else if (S_ISDIR(st.st_mode))
+						d->d_type = DT_DIR;
 				}
 			}
-			bpos += d->d_reclen;
+			if (calculate_size && d->d_type == DT_REG) {
+				if (!stated) {
+					int r = fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW);
+					if (r == -1) {
+						perror("fstatat");
+						continue;
+					}
+				}
+				size += st.st_size;
+			}
+
+			if (d->d_type == DT_DIR) {
+				int childfd = openat(dirfd, name, O_RDONLY | O_DIRECTORY);
+				if (childfd == -1) {
+					perror("openat");
+				} else {
+					traverse(childfd);
+					close(childfd);
+				}
+			}
 		}
 	}
 }
@@ -61,19 +87,27 @@ void traverse(int dirfd)
 int main(int argc, char *argv[])
 {
 	if (argc < 2) {
-		fprintf(stderr, "Usage: %s <directory>\n", argv[0]);
-		return EXIT_FAILURE;
+		fprintf(stderr, "Usage: %s [-s] <directory>\n", argv[0]);
+		return 1;
+	}
+
+	if (strcmp(argv[1], "-s") == 0) {
+		calculate_size = 1;
+		argv++;
+		argc--;
 	}
 
 	int fd = open(argv[1], O_RDONLY | O_DIRECTORY);
 	if (fd == -1) {
 		perror("open");
-		return EXIT_FAILURE;
+		return 1;
 	}
 
 	traverse(fd);
 	close(fd);
 
 	printf("Total files: %lld\n", file_count);
-	return EXIT_SUCCESS;
+	if (calculate_size)
+		printf("Total size: %lld bytes\n", size);
+	return 0;
 }

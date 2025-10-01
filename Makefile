@@ -7,3 +7,6 @@ test:: all
 	./fts .
 	./nftw .
 	./traverse .
+	./fts -s .
+	./nftw -s .
+	./traverse -s .
